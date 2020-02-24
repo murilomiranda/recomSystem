@@ -1,0 +1,233 @@
+---
+title: "Recommendation System"
+author: "Murilo Miranda"
+date: "2/21/2020"
+output:
+  html_document:
+    toc: true # table of content true
+    toc_float: true
+    code_folding: hide
+    toc_depth: 2  # upto three depths of headings (specified by #, ## and ###)
+    theme: united
+    highlight: breezedark  # specifies the syntax highlighting style
+    #css: styles.css
+  pdf_document: default
+version: '0.3'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(digits = 2)
+```
+
+
+```{r, message=FALSE}
+library(RMySQL)
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(recommenderlab)
+library(arules)
+library(arulesViz)
+```
+
+```{r, echo=FALSE}
+db_password <- 'Danielly1964'
+```
+
+We want to build a **recommendation system** to increase cross-selling in our website. Our goal is to show customers who have added a product to their basket another product they’re likely to want. Because of the nature of our data, the best way to do that is by using a method called **Market Basket Analysis**.
+
+The first step is the **data quality** assessment: we need to make sure that we can trust the data that we’re using. Make sure the information across our datasets (_line_item_, _orders_ and _products_) is consistent, and get rid of anything too strange or to believe.
+
+Then, we will have to build a **transactional dataset**: a table with one row per order and one column per product bought -meaning that the table has as many columns as the biggest order, with lots of NAs.
+
+Finally, we will use the **apriori algorithm** to create if-then rule with our products: “if a customer buys product A, then it’s likely that they’ll buy product B”. Focus on optimizing the model: it will be deployed into production by our engineering team. 
+
+
+### Read data from mySQL
+```{r, message=FALSE}
+mydb <-  dbConnect(MySQL(), user = 'root', password = db_password,
+                 dbname = 'imarket_sql', host = '127.0.0.1', port = 3306)
+```
+
+#### import line_item table
+```{r, results='hide'}
+rs <- dbSendQuery(mydb, "select * from line_item")
+line_item <-  fetch(rs, n = -1)
+dbClearResult(rs)
+```
+
+#### import orders table
+```{r, results='hide'}
+rs <- dbSendQuery(mydb, "select * from orders")
+orders <-  fetch(rs, n = -1)
+dbClearResult(rs)
+```
+
+#### import products table
+```{r, results='hide'}
+rs <- dbSendQuery(mydb, "select * from products")
+products <-  fetch(rs, n = -1)
+dbClearResult(rs)
+on.exit(dbDisconnect(mydb))
+```
+
+
+## Data Quality
+
+1. Check that all **orders** in _line_item_ are present in our _orders_ dataset. Exclude from _line_item_ any rows that do not meet that condition.
+
+```{r, warning=FALSE}
+line_item <- line_item %>% mutate(date = ymd_hms(date), unit_price = as.numeric(gsub(",", ".", unit_price)))
+
+orders <- orders %>% mutate(created_date = ymd_hms(created_date), total_paid = as.numeric(gsub(",", ".", total_paid)))
+
+products <- products %>% mutate(price = str_replace(price, "90{2,}.+", "9")) %>% mutate(price = as.numeric(as.character(price)))
+
+line_item_clean <- line_item %>% inner_join(orders, by = "id_order")
+```
+
+2. Exclude from _line_item_ any rows from orders that are not **“Completed”**.
+
+```{r}
+line_item_clean <- line_item_clean %>% filter(state == "Completed") %>% select(-state, -product_id)
+```
+
+3. Check that all **products** in _line_item_ are present in the _products_ dataset. Exclude from _line_item_ any rows that do not meet that condition.
+
+```{r}
+line_item_clean <- line_item_clean %>% filter(sku %in% products$sku)
+```
+
+4. Explore the relationship between **prices** in _line_item_ and _order_.
+
+```{r}
+values_paid <- line_item_clean %>% group_by(id_order) %>% 
+  summarise(total_estimated = sum(unit_price*product_quantity), total_paid = mean(total_paid))
+
+values_paid %>% 
+  ggplot(aes(x = total_estimated, y = total_paid)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "SUM(unit price * product quantity)",
+    y = "total paid"
+  )
+```
+
+5. Do the prices of the orders and the sum of the prices of each item in the order match? If not, can you make some assumptions that explain the differences?
+
+**No, some orders had more than one product and probably the total paid includes shipping and other taxes.**
+
+6. Exclude from _line_items_ the rows with differences that you cannot explain.
+
+```{r}
+values_paid <- values_paid %>% filter(total_estimated <= total_paid + 10, total_estimated >= total_paid - 10)
+
+line_item_clean <- line_item_clean %>% filter(id_order %in% values_paid$id_order)
+rm(values_paid)
+```
+
+```{r,echo=FALSE}
+line_item_clean %>% group_by(id_order) %>% 
+  summarise(total_estimated = sum(unit_price*product_quantity), total_paid = mean(total_paid)) %>% 
+  ggplot(aes(x = total_estimated, y = total_paid)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "SUM(unit price * product quantity)",
+    y = "total paid"
+  )
+```
+
+7. Explore the relationship between **prices** in _line_item_ and _product_:
+
+```{r}
+line_item_clean <- line_item_clean %>% inner_join(products, by = "sku")
+```
+
+```{r}
+line_item_clean %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+8. Do the prices of the items sold and the product prices match? If not, can you make some assumptions that explain the differences?
+
+**No, there are three groups of values: (1) price is similar to unit price, (2) price higher than 1e+05 and unit price smaller than 1000, and (3) price higher than 1e+05 and unit price smaller than 3000.**
+
+9. Exclude from _line_items_ the rows with differences that you cannot explain.
+
+**For now, we decided to keep only the values which the absolute difference between unit price and price is smaller than one thousand**
+
+```{r}
+line_item_clean <- line_item_clean %>% filter(abs(unit_price - price) <= 1000)
+```
+
+```{r}
+line_item_clean %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+## Transactional Dataset
+
+```{r}
+transact <- line_item_clean %>% arrange(id_order) %>% mutate(id_order_sku = paste(id_order, sku, sep = ";")) %>% select(id_order_sku) %>% unlist(., use.names=FALSE) %>% paste(., collapse = "\n" )
+
+paste("item_id;trans_id", transact, sep = "\n") %>% write("item_list")
+```
+
+```{r}
+transact <- read.transactions("item_list", format = "single", header = TRUE, sep = ";", cols = c("item_id", "trans_id"))
+summary(transact)
+```
+
+```{r}
+itemFrequencyPlot(transact, support = 0.005, cex.names=0.8)
+```
+
+## Apriori Algorithm
+
+We decided to use the average support (`r summary(itemFrequency(transact))[[4]]`) as a minimum required rule support.
+
+```{r, results='hide'}
+trans_rules <- apriori(transact, parameter = list(support = 0.00023, confidence = 0.25, minlen = 2)) 
+```
+
+```{r}
+summary(trans_rules)
+```
+
+```{r}
+inspect(sort(trans_rules, by = "lift")[1:5])
+```
+
+```{r, fig.height=10}
+plot(trans_rules, method = "grouped")
+```
+
+```{r, fig.height=10}
+plot(trans_rules, method = "graph")
+```
+
+```{r}
+fsets <- eclat(transact, parameter = list(support = 0.00023), control = list(verbose=FALSE))
+singleItems <- fsets[size(items(fsets)) == 1]
+singleSupport <- quality(singleItems)$support
+names(singleSupport) <- unlist(LIST(items(singleItems), decode = FALSE))
+head(singleSupport, n = 5)
+itemsetList <- LIST(items(fsets), decode = FALSE)
+allConfidence <- quality(fsets)$support / sapply(itemsetList, function(x) max(singleSupport[as.character(x)]))
+
+quality(fsets) <- cbind(quality(fsets), allConfidence)
+summary(fsets)
+```
