@@ -17,7 +17,7 @@ version: '0.3'
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-options(digits = 2)
+options(digits = 4, scipen=999)
 ```
 
 
@@ -72,7 +72,6 @@ dbClearResult(rs)
 on.exit(dbDisconnect(mydb))
 ```
 
-
 ## Data Quality
 
 1. Check that all **orders** in _line_item_ are present in our _orders_ dataset. Exclude from _line_item_ any rows that do not meet that condition.
@@ -115,11 +114,11 @@ values_paid %>%
   )
 ```
 
-5. Do the prices of the orders and the sum of the prices of each item in the order match? If not, can you make some assumptions that explain the differences?
+  a. Do the prices of the orders and the sum of the prices of each item in the order match? If not, can you make some assumptions that explain the differences?
 
-**No, some orders had more than one product and probably the total paid includes shipping and other taxes.**
+>**No, some orders had more than one product and probably the total paid includes shipping and other taxes.**
 
-6. Exclude from _line_items_ the rows with differences that you cannot explain.
+  b. Exclude from _line_items_ the rows with differences that you cannot explain.
 
 ```{r}
 values_paid <- values_paid %>% filter(total_estimated <= total_paid + 10, total_estimated >= total_paid - 10)
@@ -140,7 +139,7 @@ line_item_clean %>% group_by(id_order) %>%
   )
 ```
 
-7. Explore the relationship between **prices** in _line_item_ and _product_:
+5. Explore the relationship between **prices** in _line_item_ and _product_:
 
 ```{r}
 line_item_clean <- line_item_clean %>% inner_join(products, by = "sku")
@@ -156,13 +155,13 @@ line_item_clean %>% ggplot(aes(unit_price, price)) +
   )
 ```
 
-8. Do the prices of the items sold and the product prices match? If not, can you make some assumptions that explain the differences?
+  a. Do the prices of the items sold and the product prices match? If not, can you make some assumptions that explain the differences?
 
-**No, there are three groups of values: (1) price is similar to unit price, (2) price higher than 1e+05 and unit price smaller than 1000, and (3) price higher than 1e+05 and unit price smaller than 3000.**
+>**No, there are three groups of values: (1) price is similar to unit price, (2) price higher than 1e+05 and unit price smaller than 1000, and (3) price higher than 1e+05 and unit price smaller than 3000.**
 
-9. Exclude from _line_items_ the rows with differences that you cannot explain.
+  b. Exclude from _line_items_ the rows with differences that you cannot explain.
 
-**For now, we decided to keep only the values which the absolute difference between unit price and price is smaller than one thousand**
+>**For now, we decided to keep only the values which the absolute difference between unit price and price is smaller than one thousand**
 
 ```{r}
 line_item_clean <- line_item_clean %>% filter(abs(unit_price - price) <= 1000)
