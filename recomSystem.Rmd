@@ -17,18 +17,22 @@ version: '0.3'
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-options(digits = 4, scipen=999)
+options(digits = 5, scipen=999)
 ```
 
 
 ```{r, message=FALSE}
 library(RMySQL)
+library(ggpubr)
 library(tidyverse)
 library(stringr)
 library(lubridate)
 library(recommenderlab)
 library(arules)
 library(arulesViz)
+library(cluster)
+library(factoextra)
+library(knitr)
 ```
 
 ```{r, echo=FALSE}
@@ -48,6 +52,7 @@ Finally, we will use the **apriori algorithm** to create if-then rule with our p
 ```{r, message=FALSE}
 mydb <-  dbConnect(MySQL(), user = 'root', password = db_password,
                  dbname = 'imarket_sql', host = '127.0.0.1', port = 3306)
+rm(db_password)
 ```
 
 #### import line_item table
@@ -81,7 +86,8 @@ line_item <- line_item %>% mutate(date = ymd_hms(date), unit_price = as.numeric(
 
 orders <- orders %>% mutate(created_date = ymd_hms(created_date), total_paid = as.numeric(gsub(",", ".", total_paid)))
 
-products <- products %>% mutate(price = str_replace(price, "90{2,}.+", "9")) %>% mutate(price = as.numeric(as.character(price)))
+products <- products %>% mutate(price = as.numeric(as.character(price)))
+#mutate(price = str_replace(price, "90{2,}.+", "9")) %>%
 
 line_item_clean <- line_item %>% inner_join(orders, by = "id_order")
 ```
@@ -121,7 +127,7 @@ values_paid %>%
   b. Exclude from _line_items_ the rows with differences that you cannot explain.
 
 ```{r}
-values_paid <- values_paid %>% filter(total_estimated <= total_paid + 10, total_estimated >= total_paid - 10)
+values_paid <- values_paid %>% filter(abs(total_estimated - total_paid) < total_paid*0.50)
 
 line_item_clean <- line_item_clean %>% filter(id_order %in% values_paid$id_order)
 rm(values_paid)
@@ -156,15 +162,429 @@ line_item_clean %>% ggplot(aes(unit_price, price)) +
 ```
 
   a. Do the prices of the items sold and the product prices match? If not, can you make some assumptions that explain the differences?
+  
+>**No, kmeans algorithm identified four groups. Some of these groups were divided into subgroups. Groups/Subgroups were transformed by x-values**
+  
+```{r, warning=FALSE}
+set.seed(1605)
 
->**No, there are three groups of values: (1) price is similar to unit price, (2) price higher than 1e+05 and unit price smaller than 1000, and (3) price higher than 1e+05 and unit price smaller than 3000.**
+# function to compute total within-cluster sum of square 
+wss <- function(k) {
+  kmeans(line_item_clean[, c("price", "unit_price")], k, nstart = 10 )$tot.withinss
+}
+
+# Compute and plot wss for k = 2 to k = 15
+k.values <- 2:15
+
+# extract wss for 2-15 clusters
+wss_values <- map_dbl(k.values, wss)
+
+plot(k.values, log10(wss_values),
+       type="b", pch = 19, frame = FALSE, 
+       xlab="Number of clusters K",
+       ylab="log10(Total within-clusters sum of squares)")
+```
+
+```{r}
+k4 <- kmeans(line_item_clean[, c("price", "unit_price")], centers = 4, nstart = 10)
+fviz_cluster(k4, data = line_item_clean[, c("price", "unit_price")])
+```
+
+##### Group 1
+```{r}
+line_item_group1 <- line_item_clean %>% filter(k4$cluster == 1)
+
+g_before <- line_item_group1 %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+###### Group 1a
+```{r group1a}
+line_item_group1a <- line_item_group1 %>% filter(price/unit_price > 30000)
+```
+
+```{r, include=FALSE}
+line_item_group1a %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+```{r}
+line_item_group1a %>% select(unit_price, price) %>% summary()
+line_item_group1a <- line_item_group1a %>% mutate(price = price/100000)
+```
+
+###### Group 1b
+```{r group1b}
+line_item_group1b <- line_item_group1 %>% filter(price/unit_price < 30000)
+```
+
+```{r, include=FALSE}
+line_item_group1b %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+```{r}
+line_item_group1b %>% select(unit_price, price) %>% summary()
+line_item_group1b <- line_item_group1b %>% mutate(price = price/10000)
+```
+
+```{r}
+line_item_group1 <- line_item_group1a %>% bind_rows(line_item_group1b)
+
+g_after <- line_item_group1 %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+
+rm(line_item_group1a, line_item_group1b)
+```
+
+```{r}
+ggarrange(g_before, g_after, labels = c("Before", "After"), ncol = 2, nrow = 1)
+```
+
+##### Group 2
+```{r}
+line_item_group2 <- line_item_clean %>% filter(k4$cluster == 2)
+
+g_before <- line_item_group2 %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+###### Group 2a
+```{r group4a}
+line_item_group2a <- line_item_group2 %>% filter(price/unit_price > 20000)
+```
+
+```{r, include=FALSE}
+line_item_group2a %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+```{r}
+line_item_group2a %>% select(unit_price, price) %>% summary()
+line_item_group2a <- line_item_group2a %>% mutate(price = price/100000)
+```
+
+###### Group 2b
+```{r group2b}
+line_item_group2b <- line_item_group2 %>% filter(price/unit_price < 20000)
+```
+
+```{r, include=FALSE}
+line_item_group2b %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+```{r}
+line_item_group2b %>% select(unit_price, price) %>% summary()
+line_item_group2b <- line_item_group2b %>% mutate(price = price/10000)
+```
+
+```{r}
+line_item_group2 <- line_item_group2a %>% bind_rows(line_item_group2b)
+
+g_after <- line_item_group2 %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+
+rm(line_item_group2a, line_item_group2b)
+```
+
+```{r}
+ggarrange(g_before, g_after, labels = c("Before", "After"), ncol = 2, nrow = 1)
+```
+
+##### Group 3
+```{r}
+line_item_group3 <- line_item_clean %>% filter(k4$cluster == 3)
+
+g_before <- line_item_group3 %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+```{r}
+set.seed(1605)
+k2 <- kmeans(line_item_group3[, c("price", "unit_price")], centers = 2, nstart = 10)
+```
+
+###### Group 3a
+```{r group3a}
+line_item_group3a <- line_item_group3 %>% filter(k2$cluster == 1)
+```
+
+```{r, include=FALSE}
+line_item_group3a %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+There two subgroups: (1) unit price higher than 1000 and price smaller than 7000 (group3aSmall) and (2) unit price smaller than 1000 and price higher than 7000 (group3aHigh)
+
+```{r group3aSmall}
+line_item_group3aSmall <- line_item_group3a %>% filter((price-5000)/unit_price < 50)
+```
+
+```{r, include=FALSE}
+line_item_group3aSmall %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+The group3aSmall was kept.
+
+```{r group3aHigh}
+line_item_group3aHigh <- line_item_group3a %>% filter((price-5000)/unit_price >= 50)
+```
+
+```{r, include=FALSE}
+line_item_group3aHigh %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+The group3aHigh also has two subgroup: (1) ratio price and unit_price higher than 4000 (higher) and (2) ratio price and unit_price smaller than 4000 (smaller).
+
+```{r higher}
+line_item_higher <- line_item_group3aHigh %>% filter(price/unit_price > 4000)
+```
+
+```{r, include=FALSE}
+line_item_higher %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+```{r}
+line_item_higher %>% select(unit_price, price) %>% summary()
+line_item_higher <- line_item_higher %>% mutate(price = price/10000)
+```
+
+```{r smaller}
+line_item_smaller <- line_item_group3aHigh %>% filter(price/unit_price < 4000)
+```
+
+```{r, include=FALSE}
+line_item_smaller %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+```{r}
+line_item_smaller %>% select(unit_price, price) %>% summary()
+line_item_smaller <- line_item_smaller %>% mutate(price = price/1000)
+```
+
+```{r}
+line_item_group3aHigh <- line_item_higher %>% bind_rows(line_item_smaller)
+line_item_group3a <- line_item_group3aSmall %>% bind_rows(line_item_group3aHigh)
+
+rm(line_item_higher, line_item_smaller, line_item_group3aSmall, line_item_group3aHigh)
+```
+
+###### Group 3b
+```{r group3b}
+line_item_group3b <- line_item_group3 %>% filter(k2$cluster == 2)
+```
+
+```{r,include=FALSE}
+line_item_group3b %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+There two subgroups: (1) unit price smaller than 400 (group3bSmall) and (2) higher than 400 (group3bHigh)
+
+```{r group3bSmall}
+line_item_group3bSmall <- line_item_group3b %>% filter(unit_price < 400)
+```
+
+```{r,include=FALSE}
+line_item_group3bSmall %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+The group3bSmall was divided by 10000.
+```{r}
+line_item_group3bSmall %>% select(unit_price, price) %>% summary()
+line_item_group3bSmall <- line_item_group3bSmall %>% mutate(price = price/10000)
+```
+
+```{r group3bHigh}
+line_item_group3bHigh <- line_item_group3b %>% filter(unit_price > 400)
+```
+
+```{r, include=FALSE}
+line_item_group3bHigh %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+The group3bHigh was divided by 1000.
+```{r}
+line_item_group3bHigh %>% select(unit_price, price) %>% summary()
+line_item_group3bHigh <- line_item_group3bHigh %>% mutate(price = price/1000)
+```
+
+```{r}
+line_item_group3b <- line_item_group3bSmall %>% bind_rows(line_item_group3bHigh)
+line_item_group3 <- line_item_group3a %>% bind_rows(line_item_group3b)
+
+g_after <- line_item_group3 %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+
+rm(line_item_group3bSmall, line_item_group3bHigh, line_item_group3a, line_item_group3b)
+```
+
+```{r}
+ggarrange(g_before, g_after, labels = c("Before", "After"), ncol = 2, nrow = 1)
+```
+
+##### Group 4
+```{r}
+line_item_group4 <- line_item_clean %>% filter(k4$cluster == 4)
+
+g_before <- line_item_group4 %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1, slope = 20000) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+```{r}
+line_item_group4 %>% select(unit_price, price) %>% summary()
+line_item_group4 <- line_item_group4 %>% mutate(price = price/100000)
+```
+
+```{r}
+g_after <- line_item_group4 %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1, slope = 20000) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+```
+
+```{r}
+ggarrange(g_before, g_after, labels = c("Before", "After"), ncol = 2, nrow = 1)
+```
+
+##### All groups
+```{r}
+g_before <- line_item_clean %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1, slope = 20000) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+
+line_item_clean <- line_item_group1 %>% bind_rows(line_item_group2) %>% bind_rows(line_item_group3) %>% bind_rows(line_item_group4)
+
+g_after <- line_item_clean %>% ggplot(aes(unit_price, price)) + 
+  geom_point() + 
+  geom_abline(colour = 'red', size = 1.1) +
+  labs(
+    x = "unit price",
+    y = "price"
+  )
+
+rm(line_item_group1, line_item_group2, line_item_group3, line_item_group4)
+```
+
+```{r}
+ggarrange(g_before, g_after, labels = c("Before", "After"), ncol = 2, nrow = 1)
+```
 
   b. Exclude from _line_items_ the rows with differences that you cannot explain.
 
->**For now, we decided to keep only the values which the absolute difference between unit price and price is smaller than one thousand**
+>**For now, we decided to keep only the values which the absolute difference between unit price and price is smaller than the price multiplied by 75%**
 
 ```{r}
-line_item_clean <- line_item_clean %>% filter(abs(unit_price - price) <= 1000)
+line_item_clean <- line_item_clean %>% filter(abs(unit_price - price) < price*0.75)
 ```
 
 ```{r}
@@ -177,12 +597,22 @@ line_item_clean %>% ggplot(aes(unit_price, price)) +
   )
 ```
 
+```{r}
+rm(g_after, g_before, k2, k4, k.values, wss_values)
+```
+
 ## Transactional Dataset
 
 ```{r}
+# Due to limitation process some sku-items with low frequency (< 3 times bought) were removed
+product_freq <- line_item_clean %>% group_by(sku) %>% summarise(quantity = sum(product_quantity)) %>% filter(quantity >= 3)
+
+line_item_clean <- line_item_clean %>% filter(sku %in% product_freq$sku)
+
 transact <- line_item_clean %>% arrange(id_order) %>% mutate(id_order_sku = paste(id_order, sku, sep = ";")) %>% select(id_order_sku) %>% unlist(., use.names=FALSE) %>% paste(., collapse = "\n" )
 
 paste("item_id;trans_id", transact, sep = "\n") %>% write("item_list")
+rm(product_freq)
 ```
 
 ```{r}
@@ -191,15 +621,92 @@ summary(transact)
 ```
 
 ```{r}
-itemFrequencyPlot(transact, support = 0.005, cex.names=0.8)
+itemFrequencyPlot(transact, type = "absolute", horiz= TRUE, top = 20, support = 0.005, cex.names = .5)
 ```
 
 ## Apriori Algorithm
 
-We decided to use the average support (`r summary(itemFrequency(transact))[[4]]`) as a minimum required rule support.
+#### Choice of support and confidence
+```{r, message=FALSE, results='hide'}
+# Support and confidence values
+supportLevels <- c(0.01, 0.005, 0.001, 0.0005, 0.0001)
+confidenceLevels <- c(0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1)
+
+# Empty integers 
+rules_supA <- integer(length=9)
+rules_supB <- integer(length=9)
+rules_supC <- integer(length=9)
+rules_supD <- integer(length=9)
+rules_supE <- integer(length=9)
+
+for (i in 1:length(confidenceLevels)) {
+  # Apriori algorithm with a support level of 1%
+  rules_supA[i] <- length(apriori(transact, parameter=list(sup=supportLevels[1], 
+                                  conf=confidenceLevels[i], target="rules", 
+                                  minlen = 2)))
+  
+  # Apriori algorithm with a support level of 0.5%
+  rules_supB[i] <- length(apriori(transact, parameter=list(sup=supportLevels[2], 
+                                  conf=confidenceLevels[i], target="rules", 
+                                  minlen = 2)))
+  
+  # Apriori algorithm with a support level of 0.1%
+  rules_supC[i] <- length(apriori(transact, parameter=list(sup=supportLevels[3], 
+                                  conf=confidenceLevels[i], target="rules", 
+                                  minlen = 2)))
+  
+  # Apriori algorithm with a support level of 0.05%
+  rules_supD[i] <- length(apriori(transact, parameter=list(sup=supportLevels[4], 
+                                  conf=confidenceLevels[i], target="rules", 
+                                  minlen = 2)))
+  
+  # Apriori algorithm with a support level of 0.01%
+  rules_supE[i] <- length(apriori(transact, parameter=list(sup=supportLevels[5], 
+                                  conf=confidenceLevels[i], target="rules", 
+                                  minlen = 2)))
+}
+```
+
+```{r}
+# Data frame
+num_rules <- data.frame(rules_supA, rules_supB, rules_supC, rules_supD, rules_supE, confidenceLevels)
+
+# Number of rules found with a support level of 1%, 0.5%, 0.1%, 0.05% and 0.01%
+ggplot(data=num_rules, aes(x=confidenceLevels)) +
+  
+  # Plot line and points (support level of 1%)
+  geom_line(aes(y=rules_supA, colour="Support level of 1%")) + 
+  geom_point(aes(y=rules_supA, colour="Support level of 1%")) +
+  
+  # Plot line and points (support level of 0.5%)
+  geom_line(aes(y=rules_supB, colour="Support level of 0.5%")) +
+  geom_point(aes(y=rules_supB, colour="Support level of 0.5%")) +
+  
+  # Plot line and points (support level of 0.1%)
+  geom_line(aes(y=rules_supC, colour="Support level of 0.1%")) + 
+  geom_point(aes(y=rules_supC, colour="Support level of 0.1%")) +
+  
+  # Plot line and points (support level of 0.05%)
+  geom_line(aes(y=rules_supD, colour="Support level of 0.05%")) +
+  geom_point(aes(y=rules_supD, colour="Support level of 0.05%")) +
+  
+  # Plot line and points (support level of 0.01%)
+  geom_line(aes(y=rules_supE, colour="Support level of 0.01%")) +
+  geom_point(aes(y=rules_supE, colour="Support level of 0.01%")) +
+  
+  # Labs and theme
+  labs(x="Confidence levels", y="Number of rules found", 
+       title="Apriori algorithm with different support levels") +
+  theme_bw() +
+  theme(legend.title=element_blank())
+rm(i, rules_supA, rules_supB, rules_supC, rules_supD, rules_supE, confidenceLevels, supportLevels, num_rules)
+```
+
+#### Decision
+We decided to use 0.01% for support and 50% confidence.
 
 ```{r, results='hide'}
-trans_rules <- apriori(transact, parameter = list(support = 0.00023, confidence = 0.25, minlen = 2)) 
+trans_rules <- apriori(transact, parameter = list(support = 0.0001, confidence = 0.5, minlen = 2)) 
 ```
 
 ```{r}
@@ -207,7 +714,7 @@ summary(trans_rules)
 ```
 
 ```{r}
-inspect(sort(trans_rules, by = "lift")[1:5])
+inspectDT(trans_rules)
 ```
 
 ```{r, fig.height=10}
@@ -215,18 +722,152 @@ plot(trans_rules, method = "grouped")
 ```
 
 ```{r, fig.height=10}
-plot(trans_rules, method = "graph")
+plot(trans_rules, method = "graph", engine = "htmlwidget")
+```
+
+```{r, results='hide', echo=FALSE}
+# fsets <- eclat(transact, parameter = list(support = 0.00023), control = list(verbose=FALSE))
+# singleItems <- fsets[size(items(fsets)) == 1]
+# singleSupport <- quality(singleItems)$support
+# names(singleSupport) <- unlist(LIST(items(singleItems), decode = FALSE))
+# head(singleSupport, n = 5)
+# itemsetList <- LIST(items(fsets), decode = FALSE)
+# allConfidence <- quality(fsets)$support / sapply(itemsetList, function(x) max(singleSupport[as.character(x)]))
+# 
+# quality(fsets) <- cbind(quality(fsets), allConfidence)
+# summary(fsets)
+```
+
+```{r, echo=FALSE, results='asis'}
+products_id <- unique(c(unlist(LIST(rhs(trans_rules))), unlist(LIST(lhs(trans_rules)))))
+
+kable(line_item_clean %>% filter(sku %in% products_id) %>% select(sku, name_en, short_desc_en, brand, manual_categories) %>% rename(Name = name_en, Description = short_desc_en, Brand = brand, Category = manual_categories) %>% unique() %>% arrange(sku))
+rm(products_id)
+```
+
+#### Building a recommendation system
+```{r}
+# Create unique identifier
+line_item_clean <- line_item_clean %>% mutate(order_sku = paste(id_order, sku, sep = ' '))
+
+# Filter out duplicates and drop unique identifier
+line_item_clean <- line_item_clean[!duplicated(line_item_clean$order_sku), ] %>% select(-order_sku)
 ```
 
 ```{r}
-fsets <- eclat(transact, parameter = list(support = 0.00023), control = list(verbose=FALSE))
-singleItems <- fsets[size(items(fsets)) == 1]
-singleSupport <- quality(singleItems)$support
-names(singleSupport) <- unlist(LIST(items(singleItems), decode = FALSE))
-head(singleSupport, n = 5)
-itemsetList <- LIST(items(fsets), decode = FALSE)
-allConfidence <- quality(fsets)$support / sapply(itemsetList, function(x) max(singleSupport[as.character(x)]))
-
-quality(fsets) <- cbind(quality(fsets), allConfidence)
-summary(fsets)
+order_item_matrix <- line_item_clean %>%
+# Select only needed variables
+  select(id_order, sku) %>% 
+# Add a column of 1s
+  mutate(value = 1) %>%
+# Spread into order-item format
+  spread(sku, value, fill = 0) %>%
+  select(-id_order) %>%
+# Convert to matrix
+  as.matrix() %>%
+# Convert to recommenderlab class 'binaryRatingsMatrix'
+  as("binaryRatingMatrix")
 ```
+
+The data was split into a train and a test set by selecting train = 0.8 for a 80/20 train/test split. The method was set “cross” up with 2-fold cross validation. This means that the data is divided into 2 subsets of equal size, with 80% of the data used for training and the remaining 20% used for evaluation. The models are recursively estimated 2 times, each time using a different train/test split, which ensures that all orders and items are considered for both training and testing. The results can then be averaged to produce a single evaluation set. Selecting given = -1 means that for the test orders ‘all but 1’ randomly selected item is withheld for evaluation.
+
+```{r, warning=FALSE}
+# split the data into the training and the test set
+transact_rs <- evaluationScheme(order_item_matrix, method = "cross", k = 1, train = 0.8, given = -1)
+
+transact_rs
+```
+
+```{r}
+algorithms <- list(
+  "association rules" = list(name  = "AR", param = list(supp = 0.0001, conf = 0.5)),
+  "random items"      = list(name  = "RANDOM",  param = NULL),
+  #"popular items"     = list(name  = "POPULAR", param = NULL),
+  "item-based CF"     = list(name  = "IBCF", param = list(k = 2))#,
+  #"user-based CF"     = list(name  = "UBCF", param = list(method = "Cosine", nn = 500))
+)
+
+#results <- evaluate(transact_rs, algorithms, type  = "topNList", n = c(1, 5, 10, 15))
+#saveRDS(results, "algorithms.RDS")
+
+results <- readRDS("algorithms.RDS")
+```
+
+```{r, echo=FALSE}
+avg_conf_matr <- function(results) {
+  tmp <- results %>%
+    getConfusionMatrix()  %>%  
+    as.list() 
+    as.data.frame(Reduce("+",tmp) / length(tmp)) %>% 
+    mutate(n = c(1, 5, 10, 15)) %>%
+    select('n', 'precision', 'recall', 'TPR', 'FPR') 
+}
+```
+
+```{r, warning=FALSE}
+# Using map() to iterate function across all models
+results_tbl <- results %>% map(avg_conf_matr) %>% 
+# Turning into an unnested tibble
+  enframe() %>%
+# Unnesting to have all variables on same level
+  unnest()
+```
+
+#### ROC curve
+```{r}
+results_tbl %>%
+  ggplot(aes(FPR, TPR, 
+             colour = fct_reorder2(as.factor(name), 
+                      FPR, TPR))) +
+  geom_line() +
+  geom_label(aes(label = n))  +
+  labs(title = "ROC curves", colour = "Model") +
+  theme_grey(base_size = 14)
+```
+
+```{r}
+results_tbl %>%
+  ggplot(aes(recall, precision, 
+             colour = fct_reorder2(as.factor(name),  
+                      precision, recall))) +
+  geom_line() +
+  geom_label(aes(label = n))  +
+  labs(title = "Precision-Recall curves", colour = "Model") +
+  theme_grey(base_size = 14)
+```
+
+
+#### Predictions For a New User
+```{r}
+new_order <- c("APP1215")
+
+kable(line_item_clean %>% filter(sku %in% new_order) %>% select(sku, name_en, short_desc_en, brand, manual_categories) %>% rename(Name = name_en, Description = short_desc_en, Brand = brand, Category = manual_categories) %>% unique() %>% arrange(sku))
+```
+
+```{r}
+new_order_item_matrx <- line_item_clean %>% 
+# Select item descriptions from retail dataset
+  select(sku) %>% unique() %>% 
+# Add a 'value' column with 1's for customer order items
+  mutate(value = as.numeric(sku %in% new_order)) %>% 
+# Spread into sparse matrix format
+  spread(key = sku, value = value) %>% 
+# Change to a matrix
+  as.matrix() %>% 
+# Convert to recommenderlab class 'binaryRatingsMatrix'
+  as("binaryRatingMatrix")
+```
+
+```{r}
+recomm <- Recommender(getData(transact_rs, 'train'), method = "AR", param = list(supp = 0.0001, conf = 0.5))
+```
+
+
+```{r}
+pred <- predict(recomm, newdata = new_order_item_matrx, n = 10)
+```
+
+```{r}
+kable(line_item_clean %>% filter(sku %in% as(pred, 'list')[[1]]) %>% select(sku, name_en, short_desc_en, brand, manual_categories) %>% rename(Name = name_en, Description = short_desc_en, Brand = brand, Category = manual_categories) %>% unique() %>% arrange(sku))
+```
+
